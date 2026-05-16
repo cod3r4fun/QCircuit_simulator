@@ -1,94 +1,94 @@
 # qsim: High-Performance Multi-Threaded Quantum Circuit Simulator
 
-`qsim` è un simulatore industriale di circuiti quantistici generici ad alte prestazioni per ambienti POSIX-compliant, ingegnerizzato interamente in C standard. Il sistema consente l'evoluzione deterministica di registri quantistici ad $n$-qubit e il campionamento statistico multithread dello stato finale tramite porte quantistiche arbitrarie espresse in forma di matrici complesse dense di dimensione $2^n \times 2^n$.
+`qsim` is a generic quantum circuit simulator for POSIX-compliant environments, engineered entirely in standard C. The system enables the deterministic evolution of $n$-qubit quantum registers and the multi-threaded statistical sampling of the final state via arbitrary quantum gates expressed as dense complex matrices of size $2^n \times 2^n$.
 
-Progettato seguendo paradigmi di sviluppo software enterprise, `qsim` isola rigorosamente la gestione delle strutture dati opache, l'algebra lineare a bassa latenza e il runtime di orchestrazione concorrente, massimizzando il throughput computazionale su architetture multi-core e minimizzando il drift numerico floating-point.
-
----
-
-## 1. Architettura del Sistema e Modularità
-
-Il software adotta un'architettura disaccoppiata e modulare, suddivisa nei seguenti componenti funzionali:
-
-* **`main.c` (Control Flow Orchestrator)**: Gestisce il ciclo di vita dell'applicazione, decodifica l'interfaccia a riga di comando (CLI) tramite standard POSIX e coordina le transizioni di stato del simulatore (I/O, allocazione, computazione unitaria, riduzione parallela, campionamento e deallocazione).
-* **`engine.c / engine.h` (Concurrency Runtime)**: Contiene il motore di calcolo multithread. Sfrutta thread operanti su un modello ad albero binario per la riduzione delle matrici del circuito e gestisce il campionamento probabilistico isolato e concorrente.
-* **`parser.c / parser.h` (Lexical Analysis & Sanitizer)**: Svolge l'analisi lessicale e la compressione degli stream di input, convalidando la sintassi strutturale dei file di configurazione (`.q`) ed eseguendo la tokenizzazione deterministica.
-* **`qmath.c / qmath.h` (Linear Algebra Kernel)**: Kernel ottimizzato per l'algebra lineare computazionale su numeri complessi. Fornisce primitive ad alta efficienza per i prodotti matrice-matrice e matrice-vettore.
-* **`types.c / types.h` (Data Structures & Memory Isolation)**: Implementa TDA (Tipi di Dato Astratti) opachi per vettori (`Vector`) e matrici (`Matrix`). Garantisce il completo incapsulamento dei dati e previene la frammentazione della memoria tramite interfacce di allocazione e distruzione esplicite.
+`qsim` rigorously isolates the management of opaque data structures, low-latency linear algebra, and the concurrent orchestration runtime, maximizing computational throughput on multi-core architectures.
 
 ---
 
-## 2. Ingegneria del Software e Ottimizzazioni Concorrenti
+## 1. System Architecture and Modularity
 
-### 2.1 Evoluzione Unitaria tramite Albero di Riduzione Binaria Parallela
-Per evitare la serializzazione del calcolo (moltiplicazione lineare sequenziale dei gate), l'engine implementa una riduzione parallela ad **albero binario** nel metodo `mult_engine`. 
+The software adopts a decoupled and modular architecture, divided into the following functional components:
 
-I thread riducono lo spazio di ricerca combinando coppie di matrici adiacenti in parallelo ad ogni livello dell'albero (es. $M_{\text{new}} = M_{2k+1} \times M_{2k}$). 
-* **Efficienza di Scala:** L'approccio riduce la complessità temporale della composizione del circuito a livello logaritmico $O(\log N)$.
-* **Invarianza dell'Errore Numerico:** Riducendo la profondità della catena di moltiplicazioni, si minimizza l'accumulo degli errori di arrotondamento (floating-point drift) tipici dell'aritmetica complessa a precisione finita.
-
-### 2.2 Campionamento Pseudo-Casuale Isolato e Thread-Safe
-Nella fase di misurazione statistica (`measure`), `meas_engine` partiziona linearmente il carico di campionamento (shots) tra i core logici allocati. 
-
-Ogni worker thread esegue un setup indipendente sfruttando l'algoritmo discreto pre-elaborato della GNU Scientific Library (`gsl_ran_discrete_preproc`) basato sulla densità di probabilità ricavata dal vettore di stato finale ($P_j = | \alpha_j |^2$).
-* **Isolamento degli Stati**: Al fine di eliminare la contesa di lock e garantire la massima entropia statistica senza correlazione tra thread, ogni worker alloca il proprio generatore di numeri casuali (`gsl_rng`) inizializzato dinamicamente usando come seed unico l'indirizzo del descrittore del thread nativo (`pthread_self()`).
-* **Consolidamento dei Risultati**: I vettori di occorrenza locali vengono consolidati nel vettore di destinazione globale mediante una sezione critica ultra-ridotta, protetta da un mutex POSIX a bassa contesa (`my_lock`).
+* **`main.c` (Control Flow Orchestrator)**: Manages the application lifecycle, decodes the command-line interface (CLI) via POSIX standards, and coordinates the simulator's state transitions (I/O, allocation, unitary computation, parallel reduction, sampling, and deallocation).
+* **`engine.c / engine.h` (Concurrency Runtime)**: Contains the multi-threaded computing engine. It leverages threads operating on a binary tree model for circuit matrix reduction and handles isolated and concurrent probabilistic sampling.
+* **`parser.c / parser.h` (Lexical Analysis & Sanitizer)**: Performs lexical analysis and input stream compression, validating the structural syntax of configuration files (`.q`) and executing deterministic tokenization.
+* **`qmath.c / qmath.h` (Linear Algebra Kernel)**: A kernel optimized for computational linear algebra on complex numbers. It provides high-efficiency primitives for matrix-matrix and matrix-vector products.
+* **`types.c / types.h` (Data Structures & Memory Isolation)**: Implements opaque ADTs (Abstract Data Types) for vectors (`Vector`) and matrices (`Matrix`). It guarantees full data encapsulation and prevents memory fragmentation through explicit allocation and destruction interfaces.
 
 ---
 
-## 3. Strategia di Parsing e Analisi Lessicale Rigorosa
+## 2. Software Design and Concurrency Optimizations
 
-Il sistema implementa una politica rigorosa di insensibilità agli spazi vuoti. In conformità con le specifiche tecniche, tutti i caratteri di whitespace (`\t`, `\n`, ` `) vengono eliminati a monte tramite `remove_all_whitespace` per uniformare lo stream di input.
+### 2.1 Unitary Evolution via Parallel Binary Reduction Tree
+To avoid computation serialization (sequential linear multiplication of gates), the engine implements a parallel binary tree reduction within the `mult_engine` method. 
 
-### 3.1 Il Problema dei Confini dei Token (Token Boundary Erasure)
-La rimozione totale dei whitespace elimina i delimitatori naturali tra i nomi delle porte quantistiche. Di conseguenza, sorge un'ambiguità grammaticale intrinseca se l'utente definisce identificatori che sono l'uno il prefisso dell'altro (es. definire porte distinte chiamate `X`, `Y` e `XY` trasforma sia la sequenza `X Y` che la sequenza `XY` nella stringa complessa continua `XY`).
+Threads reduce the search space by combining pairs of adjacent matrices in parallel at each level of the tree (e.g., $M_{\text{new}} = M_{2k+1} \times M_{2k}$). 
+* **Scaling Efficiency:** This approach reduces the time complexity of circuit composition to a logarithmic level, $O(\log N)$.
+* **Numerical Error Invariance:** By reducing the depth of the multiplication chain, it minimizes the accumulation of rounding errors (floating-point drift) typical of finite-precision complex arithmetic.
 
-### 3.2 Soluzione Ingegneristica: Algoritmo Maximal Munch
-Per garantire un parsing deterministico e privo di ambiguità senza violare la specifica di compressione, il lexer implementa la strategia **Maximal Munch (Longest Match)**. Durante la scansione sequenziale del circuito, l'analizzatore non si ferma alla prima corrispondenza trovata nel dizionario delle definizioni, ma esamina l'intero set di regole attive per selezionare il token valido che possiede la **lunghezza in caratteri maggiore**. Questo assicura che una stringa contenente il nome del gate `G10` venga interpretata correttamente come tale, e non erroneamente frammentata nei gate `G1` e `0`.
+### 2.2 Isolated and Thread-Safe Pseudo-Random Sampling
+In the statistical measurement phase (`measure`), `meas_engine` linearly partitions the sampling workload (shots) across the allocated logical cores. 
 
-**System Assumption / Vincolo Operativo:**
-Si assume come specifica contrattuale che l'utilizzatore finale non introduca nel file di circuito nomi di porte quantistiche che creino collisioni combinatorie di prefisso quando posizionate consecutivamente (es. evitare di usare in sequenza immediata porte chiamate `X` e `Y` se esiste una porta chiamata `XY`), salvaguardando l'integrità matematica della simulazione.
+Each worker thread executes an independent setup leveraging the preprocessed discrete algorithm from the GNU Scientific Library (`gsl_ran_discrete_preproc`) based on the probability density derived from the final state vector ($P_j = | \alpha_j |^2$).
+* **State Isolation**: To eliminate lock contention and guarantee maximum statistical entropy without cross-thread correlation, each worker allocates its own random number generator (`gsl_rng`), dynamically initialized using the unique address of the native thread descriptor (`pthread_self()`) as a seed.
+* **Consolidation of Results**: Local occurrence vectors are consolidated into the global destination vector through an ultra-reduced critical section protected by a low-contention POSIX mutex (`my_lock`).
 
 ---
 
-## 4. Interfaccia a Riga di Comando (CLI)
+## 3. Parsing Strategy and Rigorous Lexical Analysis
 
-L'applicazione espone un'interfaccia CLI standard POSIX basata su flag operativi gestiti tramite l'utility `getopt`:
+The system implements a strict whitespace-insensitivity policy. All whitespace characters (`\t`, `\n`, ` `) are eliminated upfront via `remove_all_whitespace` to uniform the input stream.
 
-| Flag | Argomento | Descrizione | Requisito |
+### 3.1 The Token Boundary Erasure Problem
+The total removal of whitespaces eliminates the natural delimiters between quantum gate names. Consequently, an intrinsic grammatical ambiguity arises if the user defines identifiers that are prefixes of one another (e.g., defining distinct gates named `X`, `Y`, and `XY` transforms both the sequence `X Y` and the sequence `XY` into the continuous complex string `XY`).
+
+### 3.2 Solution: Maximal Munch Algorithm
+To guarantee deterministic and unambiguous parsing without violating the compression specification, the lexer implements the **Maximal Munch (Longest Match)** strategy. During sequential circuit scanning, the analyzer does not stop at the first match found in the definitions dictionary; instead, it examines the entire active ruleset to select the valid token possessing the **longest character length**. This ensures that a string containing the gate name `G10` is correctly interpreted as such, rather than being erroneously fragmented into gates `G1` and `0`.
+
+**System Assumption / Operational Constraint:**
+It is assumed as a contractual specification that the end user does not introduce quantum gate names into the circuit file that create combinatoric prefix collisions when positioned consecutively (e.g., avoiding using gates named `X` and `Y` in immediate sequence if a gate named `XY` exists), thereby safeguarding the mathematical integrity of the simulation.
+
+---
+
+## 4. Command Line Interface (CLI)
+
+The application exposes a standard POSIX CLI based on operational flags managed via the `getopt` utility:
+
+| Flag | Argument | Description | Requirement |
 | :--- | :--- | :--- | :--- |
-| `-s` | `string (path)` | Percorso assoluto o relativo del file `.q` contenente la definizione dello stato quantistico iniziale. | **Obbligatorio** |
-| `-c` | `string (path)` | Percorso assoluto o relativo del file `.q` contenente le definizioni delle matrici e il circuito di esecuzione. | **Obbligatorio** |
-| `-t` | `int` | Numero di thread POSIX da allocare nel thread pool concorrente. (Default: `1`). | Opzionale |
-| `-h` | *Nessuno* | Visualizza la guida in linea con la sintassi dettagliata dei comanzdi e interrompe l'esecuzione. | Opzionale |
+| `-s` | `string (path)` | Absolute or relative path to the `.q` file containing the initial quantum state definition. | **Required** |
+| `-c` | `string (path)` | Absolute or relative path to the `.q` file containing the matrix definitions and the execution circuit. | **Required** |
+| `-t` | `int` | Number of POSIX threads to allocate in the concurrent thread pool. (Default: `1`). | Optional |
+| `-h` | *None* | Displays the inline help menu with detailed command syntax and terminates execution. | Optional |
 
 ---
 
-## 5. Automazione del Build System (Makefile)
+## 5. Build System Automation (Makefile)
 
-Il progetto include un `Makefile` conforme allo standard GNU Make per l'ottimizzazione del processo di compilazione e linking. Il build system applica flag di ottimizzazione aggressivi e controlli di conformità rigorosi del codice (`-O2 -Wall -Wextra -Wpedantic`).
+The project includes a `Makefile` designed to optimize the compilation and linking process. 
 
-### Target Disponibili
+### Available Targets
 
-* `make` (o `make all` / `make qsim`): Target principale. Esegue la compilazione incrementale di tutti i file sorgente (`.c`) nei rispettivi file oggetto (`.o`) e genera l'eseguibile binario ottimizzato e collegato staticamente alle librerie esterne.
-* `make clean`: Target di manutenzione. Rimuove in modo sicuro tutti i file oggetto intermedi (`main.o`, `engine.o`, `parser.o`, `qmath.o`, `types.o`) e l'eseguibile finale `qsim` per pulire lo spazio di lavoro e forzare una compilazione totale (rebuild).
+* `make` (or `make all` / `make qsim`): Main target. Executes incremental compilation of all source files (`.c`) into their respective object files (`.o`) and generates the optimized binary executable, statically linked to external libraries.
+* `make clean`: Maintenance target. Safely removes all intermediate object files (`main.o`, `engine.o`, `parser.o`, `qmath.o`, `types.o`) and the final `qsim` executable to clean the workspace and force a full recompilation (rebuild).
 
-### Flag di Compilazione Interni
-* `-g`: Mantiene i simboli di debug utili per l'analisi tramite l'uso di `lldb` o `gdb`.
-* `-O2`: Abilita le ottimizzazioni del compilatore di secondo livello per massimizzare la velocità di esecuzione del codice e l'efficienza dei registri della CPU.
-* `-pthread`: Abilita il supporto nativo del compilatore per la libreria POSIX Threads sia in fase di compilazione che di linking.
-* `-lgsl -lgslcblas -lm`: Collega l'eseguibile alla GNU Scientific Library, al core BLAS accelerato e alla libreria matematica standard di sistema.
+### Internal Compilation Flags
+* `-g`: Retains debugging symbols useful for analysis using `lldb` or `gdb`.
+* `-O2`: Enables second-level compiler optimizations to maximize code execution speed and CPU register efficiency.
+* `-pthread`: Enables native compiler support for the University-provided POSIX Threads library during both compilation and linking.
+* `-lgsl -lgslcblas -lm`: Links the executable to the GNU Scientific Library, the accelerated BLAS core, and the standard system math library.
 
 ---
 
-## 6. Requisiti di Sistema e Deploy
+## 6. System Requirements and Deployment
 
-### Dipendenze Hardware & Software
-* Compilatore: `gcc` (v9+) o `clang` (v11+).
-* Libreria Concorrente: POSIX `pthreads`.
-* Librerie Scientifiche: `GSL (GNU Scientific Library)` e `CBLAS`.
+### Hardware & Software Dependencies
+* Compiler: `gcc` (v9+) or `clang` (v11+).
+* Concurrency Library: POSIX `pthreads`.
+* Scientific Libraries: `GSL (GNU Scientific Library)` and `CBLAS`.
 
-### Installazione Dipendenze su macOS
-Le dipendenze per l'architettura host possono essere distribuite velocemente tramite il gestore di pacchetti Homebrew:
+### Dependency Installation on macOS
+Dependencies for the host architecture can be quickly distributed via the Homebrew package manager:
 ```bash
 brew install gsl
